@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from pydantic import ValidationError
 
 from xpool.fabric import FabricGenerationId
 from xtest.harness.support.config import TEST_MODEL_ID
@@ -20,17 +21,23 @@ from xtest.harness.support.ffn import (
 )
 
 
-def test_hidden_state_generator_returns_deterministic_cloned_prefixes() -> None:
-    first, second = generate_ffn_hidden_states(hidden_size=4, seed=17, row_counts=(1, 3))
-    repeated_first, repeated_second = generate_ffn_hidden_states(hidden_size=4, seed=17, row_counts=(1, 3))
+@pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
+def test_hidden_state_generator_returns_deterministic_cloned_prefixes(dtype: torch.dtype) -> None:
+    first, second = generate_ffn_hidden_states(hidden_size=4, seed=17, row_counts=(1, 3), dtype=dtype)
+    repeated_first, repeated_second = generate_ffn_hidden_states(hidden_size=4, seed=17, row_counts=(1, 3), dtype=dtype)
 
-    assert first.dtype is second.dtype is torch.bfloat16
+    assert first.dtype is second.dtype is dtype
     assert first.is_contiguous() and second.is_contiguous()
     torch.testing.assert_close(first, repeated_first)
     torch.testing.assert_close(second, repeated_second)
     torch.testing.assert_close(first, second[:1])
     first.zero_()
     assert second[0].count_nonzero()
+
+
+def test_input_generation_rejects_unqualified_dtype() -> None:
+    with pytest.raises(ValueError, match="BF16 or FP16"):
+        generate_ffn_hidden_states(hidden_size=4, seed=17, row_counts=(1,), dtype=torch.float32)
 
 
 def test_output_comparison_gates_aggregate_and_scale_aware_error() -> None:
@@ -81,10 +88,24 @@ def test_output_comparison_gates_aggregate_and_scale_aware_error() -> None:
     assert rmse_failure.maximum_scaled_error < rmse_failure.maximum_scaled_error_limit
 
 
+def test_output_comparison_accepts_matching_fp16() -> None:
+    comparison = compare_ffn_outputs(
+        torch.ones((1, 2), dtype=torch.float16),
+        torch.ones((1, 2), dtype=torch.float16),
+        atol=0.02,
+        rtol=0.02,
+        normalized_rmse_limit=0.01,
+        maximum_scaled_error_limit=0.10,
+    )
+
+    assert comparison.passed
+
+
 @pytest.mark.parametrize(
     ("reference", "actual", "message"),
     [
         (torch.ones((1, 2), dtype=torch.float32), torch.ones((1, 2), dtype=torch.float32), "dtype"),
+        (torch.ones((1, 2), dtype=torch.bfloat16), torch.ones((1, 2), dtype=torch.float16), "dtype"),
         (torch.empty((0, 2), dtype=torch.bfloat16), torch.empty((0, 2), dtype=torch.bfloat16), "nonempty"),
         (
             torch.ones((1, 2), dtype=torch.bfloat16),
@@ -173,10 +194,11 @@ def test_routing_comparison_rejects_invalid_evidence(
         )
 
 
-def test_numerical_evidence_writes_one_strict_artifact(tmp_path: Path) -> None:
+@pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float16))
+def test_numerical_evidence_writes_one_strict_artifact(tmp_path: Path, dtype: torch.dtype) -> None:
     output = compare_ffn_outputs(
-        torch.ones((1, 2), dtype=torch.bfloat16),
-        torch.ones((1, 2), dtype=torch.bfloat16),
+        torch.ones((1, 2), dtype=dtype),
+        torch.ones((1, 2), dtype=dtype),
         atol=0.02,
         rtol=0.02,
         normalized_rmse_limit=0.01,
@@ -186,6 +208,7 @@ def test_numerical_evidence_writes_one_strict_artifact(tmp_path: Path) -> None:
         model_id=TEST_MODEL_ID,
         model_spec_digest="1" * 64,
         generation=FabricGenerationId(high=1, low=2),
+        payload_dtype=dtype,
         samples=(FfnNumericalSampleEvidence(layer_id=0, row_count=1, output=output, routing=None),),
     )
     path = tmp_path / "ffn-numerical.json"
@@ -193,6 +216,11 @@ def test_numerical_evidence_writes_one_strict_artifact(tmp_path: Path) -> None:
     evidence.write(path)
 
     assert FfnNumericalEvidence.model_validate_json(path.read_bytes()) == evidence
+    assert evidence.model_dump()["payload_dtype"] is dtype
+    assert evidence.model_dump(mode="json")["payload_dtype"] == str(dtype).removeprefix("torch.")
+    for invalid in (torch.float32, torch.int64, "half", "torch.float16", "unknown"):
+        with pytest.raises(ValidationError, match="payload_dtype"):
+            FfnNumericalEvidence.model_validate({**evidence.model_dump(), "payload_dtype": invalid})
 
 
 def test_topology_evidence_writes_complete_process_and_output_facts(tmp_path: Path) -> None:

@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from xpool.ffn import DenseFfnSpec
 from xpool.runtime.ffnagent import architecture
 from xtest.harness.support.config import TEST_MODEL_ID
 
@@ -55,6 +57,43 @@ def test_load_rejects_duplicate_config_member(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="duplicate JSON member 'architectures'"):
         architecture.load(model_id=TEST_MODEL_ID, model_path=model_path)
+
+
+@pytest.mark.parametrize("dtype", ("bfloat16", "float16"))
+def test_load_compiles_llama_dense_layers(tmp_path: Path, dtype: str) -> None:
+    config = {
+        "architectures": ["LlamaForCausalLM"],
+        "model_type": "llama",
+        "hidden_act": "silu",
+        "torch_dtype": dtype,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "num_hidden_layers": 3,
+    }
+    keys = tuple(key for layer_id in range(3) for key in dense_keys(layer_id))
+    model_path = tmp_path / "model"
+    write_indexed_model(model_path, config, keys)
+
+    spec = architecture.load(model_id=TEST_MODEL_ID, model_path=model_path)
+
+    assert spec.architecture_name == "LlamaForCausalLM"
+    assert spec.hidden_size == 16
+    assert len(spec.layers) == 3
+    assert all(cast(DenseFfnSpec, layer).intermediate_size == 32 for layer in spec.layers)
+
+
+@pytest.mark.parametrize("dtype_field", ("dtype", "torch_dtype"))
+@pytest.mark.parametrize("dtype", ("bfloat16", "float16"))
+def test_family_profile_accepts_admitted_dtypes(dtype_field: str, dtype: str) -> None:
+    config = architecture.FfnSourceConfig({"model_type": "llama", "hidden_act": "silu", dtype_field: dtype})
+    config.validate_family_profile(model_type="llama", dtype_field=dtype_field)
+
+
+@pytest.mark.parametrize("dtype", ("float32", "half", "torch.float16", "int8", None, 16))
+def test_family_profile_rejects_other_dtypes(dtype: object) -> None:
+    config = architecture.FfnSourceConfig({"model_type": "llama", "hidden_act": "silu", "torch_dtype": dtype})
+    with pytest.raises(ValueError, match="torch_dtype"):
+        config.validate_family_profile(model_type="llama", dtype_field="torch_dtype")
 
 
 def test_source_config_reads_strict_types_and_constraints() -> None:
