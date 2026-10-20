@@ -69,6 +69,11 @@ snapshot establishes CONFIG provenance rather than preserving its original
 sources. [Tooling launch snapshots](tooling.md#shared-serving-lifecycle) preserve
 complete effective configuration while binding owned resources and child inputs.
 
+`init_global_config()` accepts an explicit configuration-environment mapping.
+Omitting it reads the process environment; an empty mapping applies no
+environment overrides. This controls configuration resolution, not the process
+environment used for device visibility or MPS.
+
 Every process receives the same effective configuration. Participants compare
 configuration and their ordered Deployment Device View at the
 [startup check](#managed-mps-and-role-preparation). Registration validates
