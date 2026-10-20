@@ -122,22 +122,11 @@ def test_configured_incompatible_profile_fails_without_fallback(
         xpool.memory.load_memory_calibration_profile()
 
 
-def test_writer_atomically_replaces_one_complete_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_writer_serializes_profile_to_the_configured_path(tmp_path: Path) -> None:
     path = tmp_path / "memory.json"
     path.write_text("old", encoding="utf-8")
     install_config(path)
     expected = profile()
-    replace = xpool.memory.os.replace
-
-    def observe_replace(source: str, destination: Path) -> None:
-        assert destination == path
-        assert path.read_text(encoding="utf-8") == "old"
-        assert XpoolMemoryCalibrationProfile.model_validate_json(Path(source).read_text(encoding="utf-8")) == expected
-        replace(source, destination)
-
-    monkeypatch.setattr(xpool.memory.os, "replace", observe_replace)
-
     xpool.memory.write_memory_calibration_profile(expected)
 
     assert XpoolMemoryCalibrationProfile.model_validate_json(path.read_text(encoding="utf-8")) == expected
-    assert list(tmp_path.iterdir()) == [path]

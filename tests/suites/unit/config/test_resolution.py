@@ -248,6 +248,16 @@ def test_missing_config_path_fails(monkeypatch: pytest.MonkeyPatch) -> None:
         init_global_config()
 
 
+@pytest.mark.parametrize("environment, expected", (({}, "info"), ({"XPOOL_LOG_LEVEL": "error"}, "error")))
+def test_explicit_config_environment_is_not_process_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environment: dict[str, str], expected: str
+) -> None:
+    config_path = write_minimal_config(tmp_path)
+    monkeypatch.setenv("XPOOL_LOG_LEVEL", "debug")
+    config = init_global_config(config_path=config_path, env=environment)
+    assert config.logging.level == expected
+
+
 def test_global_config_access_is_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(xpool.config, "global_config", None)
     with pytest.raises(MissingRequiredConfig, match="global config"):

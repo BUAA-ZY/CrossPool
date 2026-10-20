@@ -12,6 +12,8 @@ wrappers. Model ID links point to the checkpoint configuration.
 | [Qwen/Qwen2.5-0.5B](https://huggingface.co/Qwen/Qwen2.5-0.5B/blob/main/config.json) | `Qwen2ForCausalLM` | ✅ Supported |
 | [Qwen/Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/blob/main/config.json) | `Qwen2ForCausalLM` | ❌ Not supported |
 | [Qwen/Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct/blob/main/config.json) | `Qwen2ForCausalLM` | ✅ Supported |
+| [Qwen/Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/blob/main/config.json) | `Qwen2ForCausalLM` | ✅ Supported |
+| [Qwen/Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct/blob/main/config.json) | `Qwen2ForCausalLM` | ❌ Not supported |
 | [Qwen/Qwen2.5-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json) | `Qwen2ForCausalLM` | ❌ Not supported |
 | [Qwen/Qwen2.5-14B-Instruct](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct/blob/main/config.json) | `Qwen2ForCausalLM` | ❌ Not supported |
 | [Qwen/Qwen2.5-32B-Instruct](https://huggingface.co/Qwen/Qwen2.5-32B-Instruct/blob/main/config.json) | `Qwen2ForCausalLM` | ❌ Not supported |

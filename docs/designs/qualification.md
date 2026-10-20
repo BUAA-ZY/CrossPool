@@ -18,6 +18,8 @@ realization, with an independent SGLang FFN reference. Shared native topology
 cases exercise other TP cardinalities with the same topology-test logic and an
 unsharded reference. These evidence surfaces are orthogonal: model suites own
 model semantics while shared topology suites own delivery cardinalities.
+FFN qualification stops new invocations after observing a retained failure.
+Its owning harness remains responsible for participant retirement.
 
 Model numerical cases explicitly declare a BF16 or FP16 payload dtype; BF16
 is the default. Declarations and retained evidence use `torch.dtype` in Python
@@ -90,12 +92,25 @@ Resource qualification checks real-model startup against the analytic or
 calibrated memory estimate. Baseline startup worlds require zero
 underprediction for every observed startup stage. Memory-pressure startup
 worlds set the operator device-memory margin to zero, hold one raw CUDA reserve
-across the complete ordered startup, and require startup to succeed when actual
-post-reserve free memory is no greater
-than the predicted peak and at most one 16-MiB positioning quantum below it.
-The 16-MiB quantum is qualification positioning resolution, not permitted
-underprediction or a production margin. Any underprediction reopens the
-estimator rather than increasing a hidden or default margin.
+through startup, inference, and normal retirement, and require startup to
+succeed with actual admission-time free memory `F` and predicted peak `P`
+satisfying `P <= F <= P + 16 MiB`. The lower bound keeps the admitted startup
+feasible; the upper bound prevents an ordinary memory-rich startup from passing
+as pressure qualification. The 16-MiB interval is positioning resolution, not
+permitted underprediction or a production margin. Any underprediction reopens
+the estimator rather than increasing a hidden or default margin.
+
+Real-model observations cover the four startup phases through execution
+installation and finish before activation launches persistent Lane Graphs.
+Calibration additionally observes a cleaned final `retained` point after its
+explicit cache trim. Production post-installation memory without that trim is
+separate diagnostic evidence, not a measurement of the cleaned point. Passing
+synthetic fitting and held-out checks does not qualify real-model startup.
+
+Temporary observers forward the original lifecycle calls and sample outside
+active Graph Capture without adding synchronization or cache trimming to
+production startup. Phase peaks remain the accuracy verdict; allocator
+snapshots describe their own observation boundary, not a different-time peak.
 
 Resource qualification runners are evidence-only tools. Production modules,
 reusable test harnesses, and permanent test cases own the runtime contracts

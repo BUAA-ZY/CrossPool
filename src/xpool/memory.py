@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import importlib
 import importlib.metadata
-import os
-import tempfile
-from contextlib import suppress
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -14,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from xpool.config import get_global_config
 from xpool.native import ABI_VERSION
 from xpool.utils import align_up
+from xpool.utils.cuda import cuda_versions
+from xpool.utils.files import atomic_write_text
 
 MIB = 1 << 20
 SIGNED_INT64_MAX = 2**63 - 1
@@ -168,7 +166,7 @@ class FfnMemoryCalibration(BaseModel):
     minimum_held_out_headroom_bytes: int = Field(
         ge=0,
         le=SIGNED_INT64_MAX,
-        description="Minimum nonnegative H0 prediction headroom retained for diagnostics.",
+        description="Minimum nonnegative held-out prediction headroom retained for diagnostics.",
     )
     coefficients: FfnMemoryCalibrationCoefficients = Field(description="Qualified FFN opaque-overhead envelope.")
 
@@ -195,17 +193,6 @@ class DeviceMemoryEstimate:
         ensure_nonnegative_int64(self.retained_bytes, self.peak_bytes)
         if self.retained_bytes > self.peak_bytes:
             raise ValueError("retained device memory cannot exceed startup peak memory")
-
-
-def cuda_versions() -> tuple[int, int]:
-    """Read CUDA driver and runtime versions without creating a CUDA context."""
-
-    runtime = importlib.import_module("cuda.bindings.runtime")
-    driver_error, driver_version = runtime.cudaDriverGetVersion()
-    runtime_error, runtime_version = runtime.cudaRuntimeGetVersion()
-    if driver_error != runtime.cudaError_t.cudaSuccess or runtime_error != runtime.cudaError_t.cudaSuccess:
-        raise RuntimeError(f"failed to query CUDA versions: driver={driver_error.name}, runtime={runtime_error.name}")
-    return int(driver_version), int(runtime_version)
 
 
 def validate_memory_calibration_profile(profile: XpoolMemoryCalibrationProfile) -> None:
@@ -298,23 +285,7 @@ def write_memory_calibration_profile(profile: XpoolMemoryCalibrationProfile) -> 
     path = get_global_config().ffn.device_memory_calibration
     if path is None:
         raise RuntimeError("ffn.device_memory_calibration is required to write a calibration Profile")
-    temporary_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = temporary_file.name
-            temporary_file.write(profile.model_dump_json(indent=2) + "\n")
-        os.replace(temporary_path, path)
-        temporary_path = None
+        atomic_write_text(path, profile.model_dump_json(indent=2) + "\n")
     except OSError as error:
         raise RuntimeError(f"failed to write memory calibration Profile {path}: {error}") from error
-    finally:
-        if temporary_path is not None:
-            with suppress(FileNotFoundError):
-                os.unlink(temporary_path)

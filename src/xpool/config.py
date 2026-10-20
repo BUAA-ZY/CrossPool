@@ -1153,6 +1153,7 @@ def init_global_config(
     *,
     config_path: str | Path | None = None,
     cli: Mapping[str, object] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> XpoolConfig:
     """Initialize the process-global CrossPool config.
 
@@ -1160,6 +1161,8 @@ def init_global_config(
         config_path: Explicit TOML config path. When provided, it takes
             precedence over ``XPOOL_CONFIG`` in the process environment.
         cli: Optional CLI-derived setting overrides.
+        env: Configuration environment. None reads the process environment;
+            an explicit empty mapping applies no environment overrides.
 
     Returns:
         The config object now returned by :func:`get_global_config`.
@@ -1178,19 +1181,20 @@ def init_global_config(
         equal effective values returns the first installed object unchanged.
     """
 
+    effective_env = os.environ if env is None else env
     effective_cli: dict[str, object] = dict(cli or {})
     if config_path is not None:
         effective_cli["config_path"] = str(config_path)
 
     config_path_setting = next(setting for setting in CONFIG_REGISTRY if setting.name == "config_path")
-    effective_path_value, effective_path_source = config_path_setting.resolve({}, effective_cli, os.environ)
+    effective_path_value, effective_path_source = config_path_setting.resolve({}, effective_cli, effective_env)
     if effective_path_source is None:
         raise MissingRequiredConfig(
             "xpool config path is required: set the XPOOL_CONFIG environment variable "
             "(or pass --config). Instance identity is derived from the "
             "one-model-one-instance mapping in this config."
         )
-    resolved = XpoolConfig.from_file(cast(str, effective_path_value), cli=effective_cli, env=os.environ)
+    resolved = XpoolConfig.from_file(cast(str, effective_path_value), cli=effective_cli, env=effective_env)
 
     global global_config
     with global_config_lock:

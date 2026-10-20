@@ -69,6 +69,13 @@ snapshot establishes CONFIG provenance rather than preserving its original
 sources. [Tooling launch snapshots](tooling.md#shared-serving-lifecycle) preserve
 complete effective configuration while binding owned resources and child inputs.
 
+`init_global_config()` accepts an explicit configuration-environment mapping.
+Omitting it reads the process environment; an empty mapping applies no
+environment overrides. Resolved experiment snapshots use an explicit mapping
+so inherited settings cannot replace experiment-owned values. Env-only debug
+inputs are carried separately through the registry. This controls configuration
+resolution, not the process environment used for device visibility or MPS.
+
 Every process receives the same effective configuration. Participants compare
 configuration and their ordered Deployment Device View at the
 [startup check](#managed-mps-and-role-preparation). Registration validates
@@ -150,10 +157,12 @@ filters their FFN tensors from attention-side loading, and preserves the model's
 attention-side behavior. Model adapters are discovered automatically and are
 split by model family. A model adapter receives a strict `FfnSourceConfig` view
 of the parsed `config.json` object and owns architecture extraction, checkpoint
-key mapping, activation selection, routing function selection, and reference
-binding for that family. The resulting `FfnModelSpec.digest()` identifies the
-compiled FFN semantics; the source JSON bytes are not carried as a separate
-contract field.
+key mapping, activation selection, and Router Algorithm and Precision selection
+for that family. The compiled Spec carries execution semantics rather than a source
+architecture name or runtime Adapter lookup. Shared
+[FFN execution](ffn-execution.md) owns Router computation and resource geometry.
+The resulting `FfnModelSpec.digest()` identifies the compiled FFN semantics; the
+source JSON bytes are not carried as a separate contract field.
 
 Outer graph mode is an attention-side concept. Eager, Decode Full, and combined
 Decode Full plus Prefill Breakable modes all invoke the same FFN data-plane
@@ -205,7 +214,7 @@ It contains global participant counts, executor lane count, scheduler policy,
 ordered model plans, and ordered Instance plans. Native processes create live
 CUDA objects and process-local addresses after retaining the plan.
 
-`FfnModelSpec` is the model-source contract. It contains ordered gated Dense or
+`FfnModelSpec` is the compiled FFN contract. It contains ordered gated Dense or
 MoE layer semantics, intrinsic dimensions, activation and routing behavior,
 and checkpoint identities. Generation planning resolves placement and device
 state separately.
@@ -291,6 +300,13 @@ Calibrated Overhead Envelope. The peak across those stages is the predicted
 peak. An explicit operator device-memory margin is added once after that peak;
 it is not part of the estimator and cannot repair estimator underprediction.
 
+The ledger counts logical Tensor storage and native device allocations. The
+allocator allowance bounds physical reservation under the pinned default native
+PyTorch allocator. Known consecutive construction groups share a segment bound;
+independent groups receive no assumed credit for cached blocks. Graph
+construction includes known transient initialization requests as well as
+retained placeholders. Placement and local startup admission use the same costs.
+
 The analytic estimator works with no prior profiling. An optional calibration
 file supplies a device-local correction learned from a synthetic, model-neutral
 corpus. With no `ffn.device_memory_calibration` path configured, admission uses
@@ -301,15 +317,53 @@ software, configuration and per-FfnAgent device evidence from direct FFN
 execution. They constrain profile reuse, not the set of device models on which
 CrossPool may run.
 
-The `xpool memory-profile` command produces calibration evidence. A profile
-records local device and software identity, fitted coefficients, observed and
-predicted allocation values, and the Calibrated Overhead Envelope. The fitter
-adds one empirically derived Device Observation Quantum to each grouped
-residual target and absorbs that correction into the fitted coefficients. The
-quantum belongs to the fitting procedure; it is separate from Profile fields
-and the operator margin. A Profile records allocation behavior and remains
-model-neutral. The profiler owns its local attention MPS scope and participants;
-FFN allocation measurements use the same direct execution environment as serving.
+The `xpool memory-profile` command runs a fixed synthetic corpus through shared
+weight allocation and execution construction. Immutable experiments combine
+concrete FFN specifications with their placement and execution configuration.
+Configuration snapshots, Fabric Plans and participants derive from the same
+experiment definition. Synthetic specifications declare FFN semantics directly,
+without loading checkpoints or selecting real source architectures. The snapshot
+describes the complete configured fleet; an experiment instance's attention
+membership belongs to its Instance Plan and may use a subset of that fleet.
+Fresh repeated worlds supply fit observations and a disjoint held-out placement
+checks the candidate. Equal feature rows retain their largest residual rather
+than an average. The fitter adds one empirically derived Device
+Observation Quantum to each grouped residual target and finds nonnegative,
+quantized coefficients minimizing total overprediction, with a canonical
+coefficient tie-break. The quantum is absorbed into the fitted coefficients;
+it is separate from Profile fields and the operator margin. Successful fitting
+and held-out validation do not replace independent
+[Resource Qualification](qualification.md#resource-evidence).
+
+A runtime Profile records device and software compatibility, fitted
+coefficients, and minimum held-out headroom. Its sibling `<stem>.evidence.json`
+retains the complete candidate Profile and separate collections of fitting and
+held-out worlds. Each world records its concrete experiment definition once,
+including the specifications, FFN TP widths and effective Instance Plans,
+together with its repetition and ordered FfnAgent observations. Each observation
+retains its point, exact ledger, allocator allowance, feature row, observed bytes,
+and analytic and calibrated predictions. Shared environment and device facts
+remain in the Profile. The evidence supports inspection and prediction
+recalculation; it does not retain a complete deployment for replay. The CLI
+atomically publishes evidence first and the runtime Profile second. Failure
+before publication leaves both previous files unchanged. If Profile publication
+fails after evidence succeeds, the previous runtime Profile remains unchanged
+and the new evidence retains its candidate; the command reports the failed stage
+and both paths.
+
+Each measurement world owns its attention MPS scope and direct FFN participants.
+The parent checks cancellation at owner-acquisition boundaries and protects child
+creation until the child handle is retained. Cancellation interrupts bootstrap
+and pre-join readiness waits. In-flight join, execution and retirement retain
+their confirmation requirements and share the existing retirement budget.
+Participants check retained sampler failures at phase and retirement boundaries,
+even after the sampling thread stops. Before join, participants stop
+cooperatively; after confirmed join, the complete world retires collectively
+before its bootstrap owner and MPS.
+If membership or retirement is unconfirmed, the parent retains the affected
+resource owners and the original failure. It logs the available operation and
+cleanup exception chains before waiting. It does not force teardown or retry
+the world.
 
 Checkpoint files may be read concurrently. Host buffers may use pinned memory,
 and independent tensor copies may use multiple CUDA streams. Device-side
@@ -551,11 +605,13 @@ multi-tenant authorization are outside the supported local deployment boundary.
 
 A locally observed numeric CUDA result that explicitly requires process
 termination supplies a separate exit condition. The narrow platform predicate
-in `xpool.utils.mps` inspects retained `torch.AcceleratorError` metadata and its
-exception chain, without querying the device or matching log text. Native Driver
-error translation preserves the numeric result and source call site through
-this Torch exception boundary. The local worker or Agent records failure and
-exits nonzero without another device or
+in `xpool.utils.cuda` inspects retained Runtime and Driver status enums, Torch's
+numeric error metadata, and the original exception chain without querying the
+device or matching log text. Shared API checks retain the original status and
+operation in typed exceptions. Native Driver error translation preserves the
+numeric result and source call site through the Torch exception boundary.
+The local worker or Agent preserves its first failure and records a later
+terminal exception's traceback before exiting nonzero without another device or
 collective call. Unknown results, heartbeat loss, `SIGQUIT` and server-wide
 `FAULT` observations do not supply that local evidence. This exit establishes
 no peer or complete-domain retirement; other owners retain their safety duties.
