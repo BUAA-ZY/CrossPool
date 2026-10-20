@@ -547,12 +547,16 @@ def test_agent_preserves_background_failure_after_confirmed_retirement(monkeypat
     assert events == ["shutdown", "heartbeat:close", "role:close", "device:complete", "client:close"]
 
 
-def test_agent_failure_callback_preserves_first_failure_and_obeys_later_terminal_result(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("first_terminal", (False, True))
+def test_agent_failure_callback_preserves_first_failure_and_obeys_terminal_result(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, first_terminal: bool
 ) -> None:
     agent = RunLoopAgent(events=[], request_shutdown=lambda: None, shutdown_point="advance")
     failure = RuntimeError("heartbeat failed")
-    terminal = torch.AcceleratorError("terminal device result")
+    try:
+        raise torch.AcceleratorError("terminal device result")
+    except torch.AcceleratorError as error:
+        terminal = error
     setattr(terminal, "error_code", 719)
 
     def exit_process(code: int) -> None:
@@ -560,12 +564,16 @@ def test_agent_failure_callback_preserves_first_failure_and_obeys_later_terminal
 
     monkeypatch.setattr(xpool.runtime.agent.os, "_exit", exit_process)
     monkeypatch.setattr(xpool.runtime.agent.torch.cuda, "synchronize", lambda device: pytest.fail("unsafe device wait"))
-    agent.fail(failure)
-    assert agent.shutdown_requested.is_set()
+    if not first_terminal:
+        agent.fail(failure)
+        assert agent.shutdown_requested.is_set()
+        caplog.clear()
     with pytest.raises(SystemExit) as error:
         agent.fail(terminal)
     assert error.value.code == 1
-    assert agent.failure is failure
+    assert agent.failure is (terminal if first_terminal else failure)
+    assert "Traceback" in caplog.text
+    assert caplog.text.count(f"{type(terminal).__name__}: terminal device result") == 1
 
 
 def test_agent_reregisters_missing_registration_before_plan(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -56,9 +56,18 @@ that geometry, so the daemon can account for each model's byte-to-token ratio.
 
 The SGLang integration supplies concrete MHA/GQA and MLA KV-pool subclasses.
 Each pool reserves one compound virtual range and owns one `KvVmmBacking`.
+Backing construction runs on the calling Instance Rank's selected current
+device. Its physical allocations remain rank-local and non-exportable.
+Recommended mapping granularity is queried with the same allocation properties
+used for physical allocation.
 Mapping and unmapping operate only on complete tail bundles, so Tensor addresses
 remain stable and the mapped region is always a contiguous prefix. The pool
 drops its Tensor views before releasing the backing at shutdown.
+
+For ordinary failures, the backing performs the applicable rollback. It
+propagates a retained terminal result to the worker without further diagnostic
+or rollback device calls, following
+[Control Plane](control-plane.md#startup-and-shutdown).
 
 Concrete ordinary and paged allocator subclasses retain SGLang's allocation
 behavior while withholding free suffix IDs above the active token capacity.

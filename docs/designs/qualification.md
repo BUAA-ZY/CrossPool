@@ -18,6 +18,8 @@ realization, with an independent SGLang FFN reference. Shared native topology
 cases exercise other TP cardinalities with the same topology-test logic and an
 unsharded reference. These evidence surfaces are orthogonal: model suites own
 model semantics while shared topology suites own delivery cardinalities.
+FFN qualification stops new invocations after observing a retained failure.
+Its owning harness remains responsible for participant retirement.
 
 Model numerical cases explicitly declare a BF16 or FP16 payload dtype; BF16
 is the default. Declarations and retained evidence use `torch.dtype` in Python

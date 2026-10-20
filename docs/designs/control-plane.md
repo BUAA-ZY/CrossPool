@@ -556,11 +556,13 @@ multi-tenant authorization are outside the supported local deployment boundary.
 
 A locally observed numeric CUDA result that explicitly requires process
 termination supplies a separate exit condition. The narrow platform predicate
-in `xpool.utils.mps` inspects retained `torch.AcceleratorError` metadata and its
-exception chain, without querying the device or matching log text. Native Driver
-error translation preserves the numeric result and source call site through
-this Torch exception boundary. The local worker or Agent records failure and
-exits nonzero without another device or
+in `xpool.utils.cuda` inspects retained Runtime and Driver status enums, Torch's
+numeric error metadata, and the original exception chain without querying the
+device or matching log text. Shared API checks retain the original status and
+operation in typed exceptions. Native Driver error translation preserves the
+numeric result and source call site through the Torch exception boundary.
+The local worker or Agent preserves its first failure and records a later
+terminal exception's traceback before exiting nonzero without another device or
 collective call. Unknown results, heartbeat loss, `SIGQUIT` and server-wide
 `FAULT` observations do not supply that local evidence. This exit establishes
 no peer or complete-domain retirement; other owners retain their safety duties.

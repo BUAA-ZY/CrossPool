@@ -35,8 +35,9 @@ from xpool.service.wire import (
     ProcessRef,
 )
 from xpool.utils.background import BackgroundThread
+from xpool.utils.cuda import is_terminal_device_error
 from xpool.utils.device import normalize_environment, visible_uuids
-from xpool.utils.mps import MpsEndpoint, is_terminal_device_error
+from xpool.utils.mps import MpsEndpoint
 from xpool.utils.procs import ProcUniqId
 from xpool.utils.sighandler import sighandle
 
@@ -613,6 +614,7 @@ class Agent(ABC):
                 self.device,
                 self.proc_id.pid,
                 error,
+                exc_info=None if first else error,
             )
             os._exit(1)
 

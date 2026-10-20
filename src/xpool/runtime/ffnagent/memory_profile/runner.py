@@ -32,7 +32,6 @@ from xpool.memory import (
     MemoryCalibrationDevice,
     MemoryCalibrationEnvironment,
     XpoolMemoryCalibrationProfile,
-    cuda_versions,
 )
 from xpool.native import ABI_VERSION, RuntimeRole
 from xpool.runtime.agent import project_fabric_arena
@@ -57,6 +56,7 @@ from xpool.runtime.ffnagent.memory_profile.fitting import (
     fit_worlds,
 )
 from xpool.runtime.ffnagent.registry import FfnExecutionRegistry
+from xpool.utils.cuda import cuda_versions
 from xpool.utils.device import visible_uuids
 from xpool.utils.mps import MPS_CLEANUP_TIMEOUT_S, MpsEndpoint, MpsScope
 from xpool.utils.sighandler import defer_signal_exceptions, sighandle

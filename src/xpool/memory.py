@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import importlib.metadata
 from dataclasses import dataclass, field
 
@@ -11,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from xpool.config import get_global_config
 from xpool.native import ABI_VERSION
 from xpool.utils import align_up
+from xpool.utils.cuda import cuda_versions
 from xpool.utils.files import atomic_write_text
 
 MIB = 1 << 20
@@ -193,17 +193,6 @@ class DeviceMemoryEstimate:
         ensure_nonnegative_int64(self.retained_bytes, self.peak_bytes)
         if self.retained_bytes > self.peak_bytes:
             raise ValueError("retained device memory cannot exceed startup peak memory")
-
-
-def cuda_versions() -> tuple[int, int]:
-    """Read CUDA driver and runtime versions without creating a CUDA context."""
-
-    runtime = importlib.import_module("cuda.bindings.runtime")
-    driver_error, driver_version = runtime.cudaDriverGetVersion()
-    runtime_error, runtime_version = runtime.cudaRuntimeGetVersion()
-    if driver_error != runtime.cudaError_t.cudaSuccess or runtime_error != runtime.cudaError_t.cudaSuccess:
-        raise RuntimeError(f"failed to query CUDA versions: driver={driver_error.name}, runtime={runtime_error.name}")
-    return int(driver_version), int(runtime_version)
 
 
 def validate_memory_calibration_profile(profile: XpoolMemoryCalibrationProfile) -> None:
