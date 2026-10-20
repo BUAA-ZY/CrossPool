@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
-import os
-import tempfile
-from contextlib import suppress
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -14,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from xpool.config import get_global_config
 from xpool.native import ABI_VERSION
 from xpool.utils import align_up
+from xpool.utils.files import atomic_write_text
 
 MIB = 1 << 20
 SIGNED_INT64_MAX = 2**63 - 1
@@ -298,23 +296,7 @@ def write_memory_calibration_profile(profile: XpoolMemoryCalibrationProfile) -> 
     path = get_global_config().ffn.device_memory_calibration
     if path is None:
         raise RuntimeError("ffn.device_memory_calibration is required to write a calibration Profile")
-    temporary_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = temporary_file.name
-            temporary_file.write(profile.model_dump_json(indent=2) + "\n")
-        os.replace(temporary_path, path)
-        temporary_path = None
+        atomic_write_text(path, profile.model_dump_json(indent=2) + "\n")
     except OSError as error:
         raise RuntimeError(f"failed to write memory calibration Profile {path}: {error}") from error
-    finally:
-        if temporary_path is not None:
-            with suppress(FileNotFoundError):
-                os.unlink(temporary_path)
