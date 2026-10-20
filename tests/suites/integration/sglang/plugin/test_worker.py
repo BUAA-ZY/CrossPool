@@ -36,11 +36,17 @@ def test_scheduler_entry_keeps_one_owner_until_confirmed_local_release(monkeypat
         worker.WorkerLifecycle.current()
 
 
-def test_later_terminal_error_requires_exit_without_replacing_first_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("first_terminal", (False, True))
+def test_terminal_error_requires_exit_without_replacing_first_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, first_terminal: bool
+) -> None:
     notified: list[signal.Signals] = []
     lifecycle = worker.WorkerLifecycle(ProcUniqId.current())
     first = RuntimeError("background transport failed")
-    terminal = torch.AcceleratorError("terminal device result")
+    try:
+        raise torch.AcceleratorError("terminal device result")
+    except torch.AcceleratorError as error:
+        terminal = error
     # Torch's native translator attaches this metadata dynamically.
     setattr(terminal, "error_code", 719)
 
@@ -53,12 +59,16 @@ def test_later_terminal_error_requires_exit_without_replacing_first_failure(monk
 
     monkeypatch.setattr(ProcUniqId, "send_signal", notify)
     monkeypatch.setattr(worker.os, "_exit", exit_process)
-    lifecycle.fail(first)
+    if not first_terminal:
+        lifecycle.fail(first)
+        caplog.clear()
     with pytest.raises(SystemExit) as exit_error:
         lifecycle.fail(terminal)
     assert exit_error.value.code == 1
-    assert lifecycle.failure is first
+    assert lifecycle.failure is (terminal if first_terminal else first)
     assert notified == [signal.SIGQUIT]
+    assert "Traceback" in caplog.text
+    assert caplog.text.count(f"{type(terminal).__name__}: terminal device result") == 1
 
 
 @pytest.mark.parametrize("reported_failure", [False, True])

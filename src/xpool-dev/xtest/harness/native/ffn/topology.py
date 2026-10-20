@@ -30,8 +30,9 @@ from xpool.runtime.instance import InstanceRankRuntime
 from xpool.service.client import XpoolClient
 from xpool.service.wire import MpsClientTermination, ServingListener
 from xpool.transport import FfnRequestMetadata
+from xpool.utils.cuda import is_terminal_device_error
 from xpool.utils.device import normalize_environment, visible_uuids
-from xpool.utils.mps import MPS_CLEANUP_TIMEOUT_S, MpsEndpoint, is_terminal_device_error
+from xpool.utils.mps import MPS_CLEANUP_TIMEOUT_S, MpsEndpoint
 from xpool.utils.procs import ProcUniqId
 from xpool.utils.sighandler import defer_signal_exceptions
 from xtest.harness.native.ffn.protocol import (
@@ -366,6 +367,9 @@ def run_ffn_instance(connection: Connection, spec: FfnInstanceSpec) -> None:
         if command is not FfnInstanceCommand.RUN:
             raise RuntimeError(f"FFN Instance expected RUN, received {command!r}")
         for invocation in spec.invocations:
+            with send_lock:
+                if failure is not None:
+                    raise failure
             tensors = safetensors.torch.load_file(invocation.input_path, device="cpu")
             if set(tensors) != {"hidden_states"}:
                 raise RuntimeError(f"FFN production input has invalid tensor keys: {sorted(tensors)}")

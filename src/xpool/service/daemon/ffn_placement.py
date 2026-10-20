@@ -9,16 +9,16 @@ from ortools.sat.python import cp_model
 
 from xpool import ffn
 from xpool.fabric import (
-    DenseFfnLayerPlan,
     FabricInstancePlan,
     FfnModelPlan,
-    MoeFfnLayerPlan,
+    place_ffn_layer,
 )
 from xpool.memory import MIB, ensure_nonnegative_int64
 from xpool.runtime.ffnagent import execution
 from xpool.runtime.ffnagent.device_memory import (
     DeviceMemoryEstimator,
-    allocator_block_allowance_bytes,
+    allocator_reservation_bytes,
+    graph_capture_allocator_allowance_bytes,
 )
 from xpool.service.errors import XpoolDaemonError
 from xpool.utils import align_up
@@ -233,7 +233,7 @@ class PlacementSolver:
                             (
                                 sum(storage_bytes),
                                 len(storage_bytes),
-                                allocator_block_allowance_bytes(storage_bytes),
+                                allocator_reservation_bytes(storage_bytes) - sum(storage_bytes),
                                 execution.required_execution_signatures(
                                     model_spec=spec,
                                     profile=instance_plan.ffn_profile,
@@ -275,11 +275,10 @@ class PlacementSolver:
             for weight_pair_key in capture_weight_pair_keys
         }
         signature_allocator_allowance_bytes = {
-            signature: allocator_block_allowance_bytes(storage_bytes)
-            for signature, storage_bytes in signature_storage_bytes.items()
+            signature: graph_capture_allocator_allowance_bytes(signature) for signature in all_signatures
         }
         capture_weight_pair_allocator_allowance_bytes = {
-            weight_pair_key: allocator_block_allowance_bytes(storage_bytes)
+            weight_pair_key: allocator_reservation_bytes(storage_bytes) - sum(storage_bytes)
             for weight_pair_key, storage_bytes in capture_weight_pair_storage_bytes.items()
         }
         remaining_placement_seconds(deadline, "resource calculation")
@@ -873,16 +872,19 @@ class PlacementSolver:
             for layer_ordinal, group in zip(layer_indices[primary_count:], projected, strict=True):
                 groups_by_coordinate[model_index, layer_ordinal] = group
 
-        model_plans = tuple(
-            FfnModelPlan(
-                model_spec_digest=spec.digest(),
-                layers=tuple(
-                    place_layer(layer, groups_by_coordinate[model_index, layer_ordinal])
-                    for layer_ordinal, layer in enumerate(spec.layers)
-                ),
+        try:
+            model_plans = tuple(
+                FfnModelPlan(
+                    model_spec_digest=spec.digest(),
+                    layers=tuple(
+                        place_ffn_layer(layer, groups_by_coordinate[model_index, layer_ordinal])
+                        for layer_ordinal, layer in enumerate(spec.layers)
+                    ),
+                )
+                for model_index, spec in enumerate(model_specs)
             )
-            for model_index, spec in enumerate(model_specs)
-        )
+        except ValueError as error:
+            raise XpoolDaemonError("conflict", str(error)) from error
         for class_index, rank_rows in enumerate(class_rank_rows):
             projected_counts = [[0] * ffnagent_count for _ in rank_rows]
             model_index = class_model_indices[class_index]
@@ -909,29 +911,3 @@ class PlacementSolver:
                 raise RuntimeError(f"FFN Placement memory mismatch for FfnAgent {ffnagent_index}")
         remaining_placement_seconds(deadline, "postsolve validation")
         return model_plans
-
-
-def place_layer(
-    layer: ffn.FfnLayerSpec,
-    execution_group: tuple[int, ...],
-) -> DenseFfnLayerPlan | MoeFfnLayerPlan:
-    """Project one intrinsic layer into one true-TP realization."""
-
-    tp_size = len(execution_group)
-    if isinstance(layer, ffn.DenseFfnSpec):
-        if layer.intermediate_size % tp_size:
-            raise XpoolDaemonError(
-                "conflict", f"Dense layer {layer.layer_id} intermediate size is not divisible by FFN TP"
-            )
-        return DenseFfnLayerPlan(
-            ffnagent_indices=execution_group,
-            local_intermediate_size=layer.intermediate_size // tp_size,
-        )
-
-    if layer.expert_intermediate_size % tp_size:
-        raise XpoolDaemonError("conflict", f"MoE layer {layer.layer_id} intermediate size is not divisible by FFN TP")
-    return MoeFfnLayerPlan(
-        ffnagent_indices=execution_group,
-        local_intermediate_size=layer.expert_intermediate_size // tp_size,
-        effective_topk=layer.routed_topk + layer.shared_expert_count,
-    )

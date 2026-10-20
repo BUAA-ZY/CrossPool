@@ -17,7 +17,7 @@ from sglang.srt.managers import data_parallel_controller, scheduler
 from sglang.srt.plugins import load_plugins
 from sglang.srt.server_args import PortArgs, ServerArgs
 
-from xpool.utils.mps import is_terminal_device_error
+from xpool.utils.cuda import is_terminal_device_error
 from xpool.utils.procs import ProcUniqId
 
 logger = logging.getLogger(__name__)
@@ -77,7 +77,12 @@ class WorkerLifecycle:
             except (OSError, psutil.Error):
                 logger.exception("serving failure notification failed pid=%s parent=%s", os.getpid(), self.parent.pid)
         if is_terminal_device_error(error):
-            logger.error("terminal device result requires worker exit pid=%s error=%s", os.getpid(), error)
+            logger.error(
+                "terminal device result requires worker exit pid=%s error=%s",
+                os.getpid(),
+                error,
+                exc_info=None if first_failure else error,
+            )
             os._exit(1)
 
     def finish(self) -> None:

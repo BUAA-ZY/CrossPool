@@ -9,8 +9,6 @@ import torch
 from cuda.bindings import driver  # ty: ignore[unresolved-import]
 from sglang.srt.mem_cache.memory_pool import KvBufferDesc
 from sglang.srt.utils.cuda_vmm_utils import (
-    check_drv,
-    get_device_granularity,
     make_device_allocation_prop,
     make_rw_access_desc,
     tensor_from_pointer,
@@ -18,6 +16,7 @@ from sglang.srt.utils.cuda_vmm_utils import (
 
 from xpool.service.wire import KvCapacityPartitionProfile
 from xpool.utils import align_up
+from xpool.utils.cuda import check_driver, is_terminal_device_error
 
 
 class KvVmmBacking:
@@ -32,7 +31,10 @@ class KvVmmBacking:
         descriptors: Sequence[KvBufferDesc],
         buffers_per_layer: int,
     ) -> None:
-        """Reserve the compound range, expose ordered views, and map the bootstrap floor."""
+        """Reserve the compound range, expose views, and map the bootstrap floor.
+
+        The calling Instance Rank must have selected ``device`` as its current device.
+        """
 
         if device.type != "cuda":
             raise ValueError("xpool elastic kv backing requires a device")
@@ -60,7 +62,12 @@ class KvVmmBacking:
             raise ValueError("xpool elastic kv descriptor row bytes disagree with its shape and dtype")
 
         token_page_size = int(token_page_size)
-        mapping_granularity_bytes = get_device_granularity(device.index)
+        allocation_properties = make_device_allocation_prop(device.index, handle_types=None)
+        status, mapping_granularity_bytes = driver.cuMemGetAllocationGranularity(
+            allocation_properties,
+            driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_RECOMMENDED,
+        )
+        check_driver(status, "cuMemGetAllocationGranularity(xpool kv)")
         layer_count = len(descriptors) // buffers_per_layer
         tokens_per_row = int(first.tokens_per_row)
         token_capacity = rows * tokens_per_row - token_page_size
@@ -91,47 +98,36 @@ class KvVmmBacking:
         self.raw_storage: torch.Tensor | None = None
         self.tensors: list[torch.Tensor] = []
 
-        allocation_properties = make_device_allocation_prop(device.index)
         self.access_descriptors = [make_rw_access_desc(device.index)]
-        with torch.cuda.device(device):
-            self.base = int(
-                check_drv(
-                    driver.cuMemAddressReserve(
-                        self.reserved_bytes,
-                        mapping_granularity_bytes,
-                        0,
-                        0,
-                    ),
-                    "cuMemAddressReserve(xpool kv)",
+        status, base = driver.cuMemAddressReserve(self.reserved_bytes, mapping_granularity_bytes, 0, 0)
+        check_driver(status, "cuMemAddressReserve(xpool kv)")
+        self.base = int(base)
+        try:
+            self.raw_storage = tensor_from_pointer(
+                self.base,
+                self.reserved_bytes,
+                device_id=device.index,
+            )
+            logical_elements = rows * layer_count * buffers_per_layer * math.prod(row_shape)
+            logical = (
+                self.raw_storage[: logical_elements * storage_dtype.itemsize]
+                .view(storage_dtype)
+                .view(
+                    rows,
+                    layer_count,
+                    buffers_per_layer,
+                    *row_shape,
                 )
             )
-            try:
-                self.raw_storage = tensor_from_pointer(
-                    self.base,
-                    self.reserved_bytes,
-                    device_id=device.index,
-                )
-                logical_elements = rows * layer_count * buffers_per_layer * math.prod(row_shape)
-                logical = (
-                    self.raw_storage[: logical_elements * storage_dtype.itemsize]
-                    .view(storage_dtype)
-                    .view(
-                        rows,
-                        layer_count,
-                        buffers_per_layer,
-                        *row_shape,
-                    )
-                )
-                self.tensors = [
-                    logical[:, layer, buffer, ...]
-                    for buffer in range(buffers_per_layer)
-                    for layer in range(layer_count)
-                ]
-                self.allocation_properties = allocation_properties
-                self.resize(floor_bundles)
-            except BaseException:
+            self.tensors = [
+                logical[:, layer, buffer, ...] for buffer in range(buffers_per_layer) for layer in range(layer_count)
+            ]
+            self.allocation_properties = allocation_properties
+            self.resize(floor_bundles)
+        except BaseException as error:
+            if not is_terminal_device_error(error):
                 self.close()
-                raise
+            raise
 
     def usable_tokens(self, bundle_count: int) -> int:
         """Return the page-aligned allocator capacity safely covered by a bundle prefix."""
@@ -159,52 +155,56 @@ class KvVmmBacking:
         while self.backed_bundles < bundle_count:
             address = self.base + self.backed_bundles * profile.bundle_bytes
             try:
-                handle = check_drv(
-                    driver.cuMemCreate(profile.bundle_bytes, self.allocation_properties, 0),
-                    "cuMemCreate(xpool kv bundle)",
-                )
+                status, handle = driver.cuMemCreate(profile.bundle_bytes, self.allocation_properties, 0)
+                check_driver(status, "cuMemCreate(xpool kv bundle)")
             except RuntimeError as error:
                 error.add_note(
                     f"target_bundles={bundle_count} backed_bundles={self.backed_bundles} "
                     f"bundle_bytes={profile.bundle_bytes}"
                 )
+                if is_terminal_device_error(error):
+                    raise
                 device = None if self.raw_storage is None else self.raw_storage.device
                 try:
                     free_bytes, total_bytes = torch.cuda.mem_get_info(device)
                 except RuntimeError as diagnostic_error:
+                    if is_terminal_device_error(diagnostic_error):
+                        raise diagnostic_error from error
                     error.add_note(f"CUDA memory query failed: {diagnostic_error}")
                 else:
                     error.add_note(f"free_bytes={free_bytes} total_bytes={total_bytes}")
                 raise
             mapped = False
             try:
-                check_drv(
-                    driver.cuMemMap(address, profile.bundle_bytes, 0, handle, 0),
-                    "cuMemMap(xpool kv bundle)",
-                )
+                (status,) = driver.cuMemMap(address, profile.bundle_bytes, 0, handle, 0)
+                check_driver(status, "cuMemMap(xpool kv bundle)")
                 mapped = True
-                check_drv(
-                    driver.cuMemSetAccess(
-                        address,
-                        profile.bundle_bytes,
-                        self.access_descriptors,
-                        len(self.access_descriptors),
-                    ),
-                    "cuMemSetAccess(xpool kv bundle)",
+                (status,) = driver.cuMemSetAccess(
+                    address,
+                    profile.bundle_bytes,
+                    self.access_descriptors,
+                    len(self.access_descriptors),
                 )
-                check_drv(driver.cuMemRelease(handle), "cuMemRelease(xpool kv bundle)")
+                check_driver(status, "cuMemSetAccess(xpool kv bundle)")
+                (status,) = driver.cuMemRelease(handle)
+                check_driver(status, "cuMemRelease(xpool kv bundle)")
                 handle = None
-            except BaseException:
+            except BaseException as error:
+                if is_terminal_device_error(error):
+                    raise
                 if mapped:
-                    check_drv(driver.cuMemUnmap(address, profile.bundle_bytes), "cuMemUnmap(xpool kv rollback)")
+                    (status,) = driver.cuMemUnmap(address, profile.bundle_bytes)
+                    check_driver(status, "cuMemUnmap(xpool kv rollback)")
                 if handle is not None:
-                    check_drv(driver.cuMemRelease(handle), "cuMemRelease(xpool kv rollback)")
+                    (status,) = driver.cuMemRelease(handle)
+                    check_driver(status, "cuMemRelease(xpool kv rollback)")
                 raise
             self.backed_bundles += 1
 
         while self.backed_bundles > bundle_count:
             address = self.base + (self.backed_bundles - 1) * profile.bundle_bytes
-            check_drv(driver.cuMemUnmap(address, profile.bundle_bytes), "cuMemUnmap(xpool kv bundle)")
+            (status,) = driver.cuMemUnmap(address, profile.bundle_bytes)
+            check_driver(status, "cuMemUnmap(xpool kv bundle)")
             self.backed_bundles -= 1
 
     def close(self) -> None:
@@ -217,7 +217,9 @@ class KvVmmBacking:
         bundle_bytes = self.capacity_profile.bundle_bytes
         while self.backed_bundles:
             address = self.base + (self.backed_bundles - 1) * bundle_bytes
-            check_drv(driver.cuMemUnmap(address, bundle_bytes), "cuMemUnmap(xpool kv close)")
+            (status,) = driver.cuMemUnmap(address, bundle_bytes)
+            check_driver(status, "cuMemUnmap(xpool kv close)")
             self.backed_bundles -= 1
-        check_drv(driver.cuMemAddressFree(self.base, self.reserved_bytes), "cuMemAddressFree(xpool kv)")
+        (status,) = driver.cuMemAddressFree(self.base, self.reserved_bytes)
+        check_driver(status, "cuMemAddressFree(xpool kv)")
         self.base = 0
